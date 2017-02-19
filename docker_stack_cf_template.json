@@ -1,0 +1,135 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Runs an Ubuntu 14.04 LTS server with Docker and pulls a django image from Hub.",
+
+  "Parameters": {
+    "InstanceType" : {
+      "Description" : "EC2 instance type",
+      "Type" : "String",
+      "Default" : "t1.micro",
+      "AllowedValues" : [ "t1.micro", "t2.micro" ],
+      "ConstraintDescription" : "must be a valid EC2 instance type"
+    },
+    "KeyName" : {
+      "Description" : "The EC2 Key Pair to allow SSH access to the instances",
+      "Type" : "String"
+    },
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "t1.micro"    : { "Arch" : "64" }
+    },
+
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "64" : "ami-408c7f28", "64HVM" : "ami-588c7f30" },
+      "us-west-2"      : { "64" : "ami-f34032c3", "64HVM" : "ami-d34032e3" },
+      "us-west-1"      : { "64" : "ami-a26265e7", "64HVM" : "ami-5a61661f" },
+      "eu-west-1"      : { "64" : "ami-cb4986bc", "64HVM" : "ami-25488752" },
+      "ap-southeast-1" : { "64" : "ami-506d3102", "64HVM" : "ami-426d3110" },
+      "ap-southeast-2" : { "64" : "ami-7bb8dd41", "64HVM" : "ami-77b8dd4d" },
+      "ap-northeast-1" : { "64" : "ami-19dd9218", "64HVM" : "ami-d5dd92d4" },
+      "sa-east-1"      : { "64" : "ami-8f0aa692", "64HVM" : "ami-850aa698" }
+    }
+  },
+
+  "Resources" : {
+
+    "DockerHost" : {
+      "Type" : "AWS::EC2::Instance",
+      "Properties" : {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" }, "Arch" ] } ] },
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "SecurityGroups" : [ { "Ref" : "ServerSecurityGroup" } ],
+        "KeyName" : { "Ref" : "KeyName" },
+        "UserData" : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/sh\n",
+          "# Install Upgrades\n",
+          "apt-get update\n",
+          "apt-get -y upgrade\n",
+
+          "# Set up SSH throttling\n",
+          "iptables -A INPUT -p tcp --syn --dport 22 -m recent --name ssh --set\n",
+          "iptables -A INPUT -p tcp --syn --dport 80 -m recent --name www --set\n",
+          "iptables -A INPUT -p tcp --syn --dport 22 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 --rttl -j LOG --log-prefix \"SSH_brute_force \"\n",
+          "iptables -A INPUT -p tcp --syn --dport 22 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 --rttl -j DROP\n",
+          "iptables-save > /etc/iptables.rules\n",
+          "echo '#!/bin/sh' > /etc/network/if-pre-up.d/iptablesload\n",
+          "echo 'iptables-restore < /etc/iptables.rules' >> /etc/network/if-pre-up.d/iptablesload\n",
+          "echo 'exit 0' >> /etc/network/if-pre-up.d/iptablesload\n",
+          "chmod a+x /etc/network/if-pre-up.d/iptablesload\n",
+
+          "# Install Packages\n",
+          "apt-get -y install lynx docker.io figlet\n",
+          "ln -sf /usr/bin/docker.io /usr/local/bin/docker\n",
+          "usermod -a -G docker ubuntu\n",
+
+          "# Set motd\n",
+          "figlet Tikal > /etc/motd\n",
+
+          "# Run docker container\n",
+          "docker run -d -p 80:80 -t camelel/django:allowed\n",
+          ]] }},
+        "BlockDeviceMappings" : [ {
+          "DeviceName" : "/dev/sda",
+          "VirtualName" : "ephemeral0"
+        } ]
+      },
+      "DependsOn" : "LinuxInstance"
+    },
+
+    "LinuxInstance" : {
+      "Type" : "AWS::EC2::Instance",
+      "Properties" : {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionArch2AMI", { "Ref" : "AWS::Region" },
+          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" }, "Arch" ] } ] },
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "SecurityGroups" : [ { "Ref" : "ServerSecurityGroup" } ],
+        "KeyName" : { "Ref" : "KeyName" },
+        "BlockDeviceMappings" : [ {
+          "DeviceName" : "/dev/sda",
+          "VirtualName" : "ephemeral0"
+        } ],
+      },
+    },
+
+    "ServerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Docker Server Security Group",
+        "SecurityGroupIngress" : [
+          { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : "0.0.0.0/0"},
+          { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "CidrIp" : "0.0.0.0/0"}
+        ]
+      }
+    }
+  },
+
+  "Outputs" : {
+    "DockerHostAddress" : {
+      "Value" : { "Fn::GetAtt" : [ "DockerHost", "PublicDnsName" ] },
+      "Description" : "DockerHost Server Domain Name"
+    },
+    "DockerHostPublicIp" : {
+      "Value" : { "Fn::GetAtt" : [ "DockerHost", "PublicIp" ]},
+      "Description" : "DockerHost Server PublicIp Address"
+    },
+    "LinuxInstanceAddress" : {
+      "Value" : { "Fn::GetAtt" : [ "LinuxInstance", "PublicDnsName" ] },
+      "Description" : "LinuxInstance Domain Name"
+    },
+    "LinuxInstancePublicIp" : {
+      "Value" : { "Fn::GetAtt" : [ "LinuxInstance", "PublicIp" ]},
+      "Description" : "LinuxInstance PublicIp Address"
+    },
+    "SecurityGroup" : {
+      "Value" : { "Fn::GetAtt" : [ "ServerSecurityGroup", "GroupId" ] },
+      "Description" : "Server Security Group Id"
+    },
+    "AvailabilityZone" : {
+      "Value" : { "Fn::GetAtt" : [ "DockerHost", "AvailabilityZone" ]},
+      "Description" : "DockerHost Availability Zone"
+    },
+  }
+}
